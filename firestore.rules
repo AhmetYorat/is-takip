@@ -1,0 +1,162 @@
+rules_version = '2';
+
+// Security model summary (see CLAUDE.md for the full data model):
+//  - `role` on users/{uid} can only ever be changed by an existing patron
+//    (never by the user themself) — this is what makes "ilk kullanıcı
+//    patron olur, patron rolleri değiştirir" actually enforced server-side.
+//  - Automatic ("OTOMATİK") alacak entries (receivables.type == 'otomatik')
+//    can only be written by Cloud Functions (Admin SDK, which bypasses
+//    these rules entirely) — clients may only create type == 'manuel'.
+//  - `payments` (tahsilatlar) are append-only: created once, never edited
+//    or deleted, mirroring a real payment audit log. A payment linked to a
+//    receivable (`receivableId` set) only ever increases that receivable's
+//    `paidAmount` — never decreases or touches any other field.
+//  - Job assignment/approval (status, assignedTo, approvedBy) is
+//    patron-only; an assigned personel may only progress their own job's
+//    status forward (approved -> in_progress -> completed).
+//  - `assignedTo` on jobs is a list (a job can have multiple assignees).
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function userRole(uid) {
+      return get(/databases/$(database)/documents/users/$(uid)).data.role;
+    }
+
+    function isPatron() {
+      return isSignedIn() && userRole(request.auth.uid) == 'patron';
+    }
+
+    function onlyFieldsChanged(fields) {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(fields);
+    }
+
+    // ---- users -----------------------------------------------------------
+    match /users/{uid} {
+      allow read: if isSignedIn();
+
+      // Self-registration only; role always starts as 'personel' — the
+      // assignPatronRoleOnCreate Cloud Function (Admin SDK) promotes the
+      // first user to 'patron' right after, bypassing these rules.
+      allow create: if isSignedIn()
+                    && request.auth.uid == uid
+                    && request.resource.data.role == 'personel';
+
+      allow update: if isSignedIn() && (
+        // Users may edit their own profile (e.g. fcmTokens) but never their
+        // own role.
+        (request.auth.uid == uid && onlyFieldsChanged(['name', 'fcmTokens']))
+        ||
+        // A patron may change exactly one other user's role, or fix their
+        // display name (e.g. it defaulted to an email prefix at some point).
+        (isPatron() && (onlyFieldsChanged(['role']) || onlyFieldsChanged(['name'])))
+      );
+
+      allow delete: if false;
+    }
+
+    // ---- jobs --------------------------------------------------------------
+    match /jobs/{jobId} {
+      allow read: if isSignedIn() && (
+        isPatron()
+        || request.auth.uid in resource.data.assignedTo
+        || resource.data.createdBy == request.auth.uid
+      );
+
+      allow create: if isSignedIn()
+                    && request.resource.data.createdBy == request.auth.uid
+                    && (
+                      // Personel-created: needs a patron's approval, never
+                      // pre-assigned.
+                      (request.resource.data.status == 'pending_approval'
+                        && request.resource.data.approvedBy == null
+                        && request.resource.data.assignedTo.size() == 0)
+                      ||
+                      // Patron-created: self-approved, no approval needed,
+                      // may optionally assign personnel right away.
+                      (request.resource.data.status == 'approved'
+                        && isPatron()
+                        && request.resource.data.approvedBy == request.auth.uid)
+                    );
+
+      allow update: if isSignedIn() && (
+        // Patron: assign/approve/reject or any other field.
+        isPatron()
+        ||
+        // Assigned personel: may only move their own job forward.
+        (
+          request.auth.uid in resource.data.assignedTo &&
+          onlyFieldsChanged(['status', 'updatedAt']) &&
+          resource.data.status in ['approved', 'in_progress'] &&
+          request.resource.data.status in ['in_progress', 'completed']
+        )
+      );
+
+      allow delete: if false;
+    }
+
+    // ---- receivables (alacaklar) --------------------------------------------
+    match /receivables/{receivableId} {
+      allow read: if isSignedIn();
+
+      // Automatic entries are only ever written by Cloud Functions
+      // (Admin SDK bypasses rules). Manual ones are patron-only (alacak
+      // tracking isn't shown to personel in the UI at all), starting at
+      // paidAmount 0 — payments bump it, never the create call.
+      allow create: if isPatron()
+                    && request.resource.data.type == 'manuel'
+                    && request.resource.data.jobId == null
+                    && request.resource.data.paidAmount == 0
+                    && request.resource.data.totalAmount > 0
+                    && request.resource.data.createdBy == request.auth.uid;
+
+      // Only `paidAmount` may change, and only upward — it's kept in sync
+      // with linked payments by FirestoreService.addPayment, never set
+      // directly by the UI.
+      allow update: if isSignedIn()
+                    && onlyFieldsChanged(['paidAmount'])
+                    && request.resource.data.paidAmount is number
+                    && request.resource.data.paidAmount >= resource.data.paidAmount;
+
+      allow delete: if false;
+    }
+
+    // ---- payments (tahsilatlar) ----------------------------------------------
+    match /payments/{paymentId} {
+      // Patron sees every payment; personel only ever sees their own —
+      // matches the `watchPaymentsCreatedBy` query the app runs for them.
+      allow read: if isSignedIn()
+                  && (isPatron() || resource.data.createdBy == request.auth.uid);
+
+      allow create: if isSignedIn()
+                    && request.resource.data.createdBy == request.auth.uid
+                    && request.resource.data.amount > 0;
+
+      // Append-only: a payment is never edited or deleted once recorded.
+      allow update, delete: if false;
+    }
+
+    // ---- notifications ------------------------------------------------------
+    match /notifications/{notificationId} {
+      allow read: if isSignedIn() && resource.data.userId == request.auth.uid;
+
+      // Only Cloud Functions (Admin SDK) create notifications.
+      allow create: if false;
+
+      // Owner may only mark their own notification read.
+      allow update: if isSignedIn()
+                    && resource.data.userId == request.auth.uid
+                    && onlyFieldsChanged(['read']);
+
+      allow delete: if false;
+    }
+
+    // ---- internal ------------------------------------------------------------
+    match /meta/{document=**} {
+      allow read, write: if false; // Admin SDK (Cloud Functions) only.
+    }
+  }
+}

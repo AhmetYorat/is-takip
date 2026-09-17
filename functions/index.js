@@ -11,8 +11,10 @@
 const {initializeApp} = require("firebase-admin/app");
 const {getFirestore, FieldValue} = require("firebase-admin/firestore");
 const {getMessaging} = require("firebase-admin/messaging");
+const {getAuth} = require("firebase-admin/auth");
 const {onDocumentCreated, onDocumentUpdated} =
   require("firebase-functions/v2/firestore");
+const {onCall, HttpsError} = require("firebase-functions/v2/https");
 const {logger} = require("firebase-functions");
 
 initializeApp();
@@ -80,6 +82,42 @@ function notifyAssignees(tasks, jobId, job, assigneeUids) {
 }
 
 /**
+ * Keeps the "(OTOMATİK)" alacak (receivable) entry for a job's price in
+ * sync with that price: creates it if one doesn't exist yet, or updates its
+ * `totalAmount` if it does. Never touches `paidAmount` — that's
+ * `FirestoreService.addPayment`'s exclusive domain. Shared by
+ * [onJobCreated] (price given at creation) and [onJobPriceSet] (price set
+ * or edited later from the job detail page) so they never drift apart on
+ * which fields get written.
+ */
+async function syncAutomaticReceivable(tasks, jobId, job) {
+  if (typeof job.price !== "number" || job.price <= 0) return;
+
+  const existing = await db
+      .collection("receivables")
+      .where("jobId", "==", jobId)
+      .limit(1)
+      .get();
+
+  if (existing.empty) {
+    tasks.push(
+        db.collection("receivables").add({
+          title: job.title,
+          totalAmount: job.price,
+          paidAmount: 0,
+          type: "otomatik",
+          jobId,
+          customerName: job.customerName || null,
+          createdBy: job.createdBy || null,
+          createdAt: FieldValue.serverTimestamp(),
+        }),
+    );
+  } else {
+    tasks.push(existing.docs[0].ref.update({totalAmount: job.price}));
+  }
+}
+
+/**
  * A personel's new job automatically becomes an alacak (receivable) entry
  * (badged "(OTOMATİK)" client-side) and every patron gets an
  * approval-needed notification. If a patron assigned personnel right at
@@ -93,20 +131,7 @@ exports.onJobCreated = onDocumentCreated("jobs/{jobId}", async (event) => {
 
   const tasks = [];
 
-  if (typeof job.price === "number" && job.price > 0) {
-    tasks.push(
-        db.collection("receivables").add({
-          title: job.title,
-          totalAmount: job.price,
-          paidAmount: 0,
-          type: "otomatik",
-          jobId,
-          customerName: job.customerName || null,
-          createdBy: job.createdBy || null,
-          createdAt: FieldValue.serverTimestamp(),
-        }),
-    );
-  }
+  await syncAutomaticReceivable(tasks, jobId, job);
 
   // Patron-created jobs are self-approved (no pending_approval step), so
   // there's nothing for other patrons to be notified about.
@@ -188,6 +213,29 @@ exports.onJobStatusChanged = onDocumentUpdated(
 );
 
 /**
+ * A job's price was set for the first time, or edited afterwards (job
+ * detail page's "Fiyat Ekle"/"Fiyatı Düzenle" — `firestore.rules` decides
+ * who may do which: a patron always, the creator only while it's still
+ * `pending_approval`, unless it's the very first price the job's ever had).
+ * Keeps the linked "(OTOMATİK)" alacak entry's `totalAmount` in step —
+ * creating it if this is the first price, updating it otherwise — via
+ * [syncAutomaticReceivable].
+ */
+exports.onJobPriceSet = onDocumentUpdated("jobs/{jobId}", async (event) => {
+  const before = event.data.before.data();
+  const after = event.data.after.data();
+  const jobId = event.params.jobId;
+
+  const beforePrice = typeof before.price === "number" ? before.price : 0;
+  const afterPrice = typeof after.price === "number" ? after.price : 0;
+  if (beforePrice === afterPrice) return;
+
+  const tasks = [];
+  await syncAutomaticReceivable(tasks, jobId, after);
+  await Promise.all(tasks);
+});
+
+/**
  * Mirrors every `notifications/{id}` doc to FCM push on the target user's
  * registered devices, pruning tokens that are no longer valid.
  */
@@ -238,3 +286,118 @@ exports.onNotificationCreated = onDocumentCreated(
       }
     },
 );
+
+/**
+ * Deletes a job — always via this callable, never a direct client write
+ * (`firestore.rules` keeps `jobs.delete` permanently `false`) because
+ * whether it's allowed depends on a different collection's data (the
+ * linked automatic receivable's `paidAmount`), which security rules can't
+ * look up (no doc-id relationship, only a `jobId` field).
+ *
+ * Anyone signed in may call it, but only a patron, or the job's own
+ * creator while it's still `pending_approval`, is authorized — mirrors
+ * `Job.canBeDeletedBy`. If the job has an automatic receivable that's
+ * already been paid against (`paidAmount > 0`), deletion is refused
+ * outright to protect that payment history; otherwise the receivable (if
+ * any) is deleted along with the job.
+ */
+exports.deleteJob = onCall(async (request) => {
+  const uid = request.auth && request.auth.uid;
+  if (!uid) {
+    throw new HttpsError(
+        "unauthenticated",
+        "Bu işlem için giriş yapmış olmanız gerekir.",
+    );
+  }
+  const jobId = request.data && request.data.jobId;
+  if (typeof jobId !== "string" || !jobId) {
+    throw new HttpsError(
+        "invalid-argument",
+        "Geçerli bir iş kimliği gerekli.",
+    );
+  }
+
+  const jobRef = db.collection("jobs").doc(jobId);
+  const jobSnap = await jobRef.get();
+  if (!jobSnap.exists) {
+    throw new HttpsError("not-found", "İş bulunamadı.");
+  }
+  const job = jobSnap.data();
+
+  const userSnap = await db.collection("users").doc(uid).get();
+  const isPatron = userSnap.exists && userSnap.data().role === ROLE_PATRON;
+  const canDelete = isPatron ||
+      (job.createdBy === uid && job.status === "pending_approval");
+  if (!canDelete) {
+    throw new HttpsError("permission-denied", "Bu işi silme yetkiniz yok.");
+  }
+
+  const receivablesSnap = await db.collection("receivables")
+      .where("jobId", "==", jobId)
+      .limit(1)
+      .get();
+  if (!receivablesSnap.empty &&
+      (receivablesSnap.docs[0].data().paidAmount || 0) > 0) {
+    throw new HttpsError(
+        "failed-precondition",
+        "Bu iş için ödeme alınmış, silinemez.",
+    );
+  }
+
+  const batch = db.batch();
+  batch.delete(jobRef);
+  if (!receivablesSnap.empty) batch.delete(receivablesSnap.docs[0].ref);
+  await batch.commit();
+});
+
+/**
+ * Self-service account deletion (Apple App Store guideline 5.1.1(v)).
+ * Runs with the Admin SDK so it isn't subject to firestore.rules (which,
+ * e.g., never lets a client delete its own `users/{uid}` doc) and so a
+ * client's stale-but-still-valid ID token can't be used to fight this: the
+ * Auth user is removed for real, not just disabled.
+ *
+ * Deletes the caller's personal data: their `users/{uid}` profile (name,
+ * email, fcmTokens), every notification addressed to them, and their
+ * membership in any job's `assignedTo`. Jobs/receivables/payments/expenses/
+ * staffPayments they created are *kept* — those are shared business/
+ * financial records other users' history depends on (payments and
+ * staffPayments are an immutable audit log, a deleted user's expenses would
+ * otherwise retroactively shrink past months' company totals and their
+ * reimbursement balance — see ../firestore.rules), which Apple's guideline
+ * explicitly allows retaining for legitimate record-keeping even after
+ * account deletion.
+ */
+exports.deleteAccount = onCall(async (request) => {
+  const uid = request.auth && request.auth.uid;
+  if (!uid) {
+    throw new HttpsError(
+        "unauthenticated",
+        "Bu işlem için giriş yapmış olmanız gerekir.",
+    );
+  }
+
+  const batch = db.batch();
+
+  const notificationsSnap = await db
+      .collection("notifications")
+      .where("userId", "==", uid)
+      .get();
+  notificationsSnap.forEach((doc) => batch.delete(doc.ref));
+
+  const assignedJobsSnap = await db
+      .collection("jobs")
+      .where("assignedTo", "array-contains", uid)
+      .get();
+  assignedJobsSnap.forEach((doc) => {
+    batch.update(doc.ref, {assignedTo: FieldValue.arrayRemove(uid)});
+  });
+
+  batch.delete(db.collection("users").doc(uid));
+
+  await batch.commit();
+  await getAuth().deleteUser(uid);
+
+  logger.info(`users/${uid} deleted their own account.`);
+  return {success: true};
+});

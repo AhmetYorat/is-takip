@@ -8,11 +8,15 @@ final _currencyFormat = NumberFormat.currency(
 
 final _dateFormat = DateFormat('d MMM y', 'tr_TR');
 final _dateTimeFormat = DateFormat('d MMM y HH:mm', 'tr_TR');
+final _monthFormat = DateFormat('MMMM y', 'tr_TR');
 
 String formatCurrency(num amount) => _currencyFormat.format(amount);
 
 String formatDate(DateTime? date) =>
     date == null ? '-' : _dateFormat.format(date);
+
+/// "Eylül 2026" — used by the month picker bar on the Giderler page.
+String formatMonth(DateTime month) => _monthFormat.format(month);
 
 String formatDateTime(DateTime? date) =>
     date == null ? '-' : _dateTimeFormat.format(date);

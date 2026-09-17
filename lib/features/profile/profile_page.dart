@@ -159,6 +159,18 @@ class ProfilePage extends ConsumerWidget {
                 side: BorderSide(color: Theme.of(context).colorScheme.error),
               ),
             ),
+            const SizedBox(height: AppSpacing.sm),
+            TextButton.icon(
+              onPressed: () => _confirmAndDeleteAccount(context, ref),
+              icon: Icon(
+                Icons.delete_forever_outlined,
+                color: Theme.of(context).colorScheme.error,
+              ),
+              label: Text(
+                'Hesabı Sil',
+                style: TextStyle(color: Theme.of(context).colorScheme.error),
+              ),
+            ),
           ],
         ),
       ),
@@ -178,4 +190,43 @@ Future<void> _showEditNameDialog(
   );
   if (newName == null || newName == currentName) return;
   await ref.read(authServiceProvider).updateOwnName(newName);
+}
+
+Future<void> _confirmAndDeleteAccount(BuildContext context, WidgetRef ref) async {
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: const Text('Hesabı sil'),
+      content: const Text(
+        'Hesabınız ve profil bilgileriniz kalıcı olarak silinecek, bu '
+        'işlem geri alınamaz. Devam etmek istiyor musunuz?',
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(false),
+          child: const Text('Vazgeç'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(context).pop(true),
+          style: FilledButton.styleFrom(
+            backgroundColor: Theme.of(context).colorScheme.error,
+          ),
+          child: const Text('Hesabı Sil'),
+        ),
+      ],
+    ),
+  );
+  if (confirmed != true || !context.mounted) return;
+
+  ref.read(accountDeletionInProgressProvider.notifier).state = true;
+  try {
+    await ref.read(authServiceProvider).deleteAccount();
+    await ref.read(authServiceProvider).signOut();
+  } catch (e) {
+    ref.read(accountDeletionInProgressProvider.notifier).state = false;
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Hesap silinemedi. ${authErrorMessage(e)}')),
+    );
+  }
 }

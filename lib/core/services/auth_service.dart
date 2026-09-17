@@ -1,4 +1,5 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -33,13 +34,24 @@ final currentAppUserProvider = StreamProvider<AppUser?>((ref) {
 
   return docRef.snapshots().asyncMap((doc) async {
     if (doc.exists) return AppUser.fromFirestore(doc);
-    if (!creatingProfile) {
+    // Skip self-heal while the `deleteAccount` Cloud Function is deleting
+    // this exact doc — the still-signed-in client would otherwise recreate
+    // it out from under the deletion (see accountDeletionInProgressProvider).
+    if (!creatingProfile && !ref.read(accountDeletionInProgressProvider)) {
       creatingProfile = true;
       await docRef.set(defaultUserProfileMap(user));
     }
     return null;
   });
 });
+
+/// True for the brief window between requesting server-side account
+/// deletion and the client actually signing out. Guards
+/// [currentAppUserProvider]'s self-heal from racing the `deleteAccount`
+/// Cloud Function: the client is still authenticated while the function
+/// deletes `users/{uid}`, and without this flag that doc-missing event
+/// would make the client recreate the very profile being deleted.
+final accountDeletionInProgressProvider = StateProvider<bool>((ref) => false);
 
 /// Default `users/{uid}` document for a freshly authenticated user. `role`
 /// always starts as `personel` here — `assignPatronRoleOnCreate` (Cloud
@@ -115,6 +127,17 @@ class AuthService {
   }
 
   Future<void> signOut() => _auth.signOut();
+
+  /// Permanently deletes the signed-in user's account: the Firebase Auth
+  /// user itself (not a soft-disable — required by Apple guideline
+  /// 5.1.1(v)) plus their personal Firestore data, via the `deleteAccount`
+  /// Cloud Function (server-side, so it isn't subject to client
+  /// firestore.rules and doesn't require a recent login). Does not sign
+  /// out locally — call [signOut] afterwards once the caller is done
+  /// (e.g. after clearing [accountDeletionInProgressProvider]).
+  Future<void> deleteAccount() async {
+    await FirebaseFunctions.instance.httpsCallable('deleteAccount').call();
+  }
 }
 
 String authErrorMessage(Object error) {
@@ -137,6 +160,9 @@ String authErrorMessage(Object error) {
       default:
         return 'Bir hata oluştu: ${error.message ?? error.code}';
     }
+  }
+  if (error is FirebaseFunctionsException) {
+    return 'Bir hata oluştu: ${error.message ?? error.code}';
   }
   return 'Beklenmeyen bir hata oluştu.';
 }

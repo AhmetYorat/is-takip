@@ -87,10 +87,11 @@ class JobCard extends StatelessWidget {
           const SizedBox(height: AppSpacing.sm),
           Row(
             children: [
-              Text(
-                formatCurrency(job.price),
-                style: textTheme.titleMedium?.copyWith(color: colors.accent),
-              ),
+              if (job.hasPrice)
+                Text(
+                  formatCurrency(job.price!),
+                  style: textTheme.titleMedium?.copyWith(color: colors.accent),
+                ),
               const Spacer(),
               if (assignedToNames.isNotEmpty) ...[
                 Icon(Icons.person_outline, size: 16, color: muted),

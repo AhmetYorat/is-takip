@@ -5,8 +5,10 @@ import 'package:go_router/go_router.dart';
 import '../core/services/auth_service.dart';
 import '../features/auth/login_page.dart';
 import '../features/auth/register_page.dart';
+import '../features/expenses/staff_expenses_page.dart';
 import '../features/jobs/job_create_page.dart';
 import '../features/jobs/job_detail_page.dart';
+import '../features/jobs/job_edit_page.dart';
 import '../features/receivables/receivable_detail_page.dart';
 import '../features/shell/role_based_shell.dart';
 import '../features/shell/splash_page.dart';
@@ -72,9 +74,19 @@ final routerProvider = Provider<GoRouter>((ref) {
             JobDetailPage(jobId: state.pathParameters['id']!),
       ),
       GoRoute(
+        path: AppRoutes.jobEdit,
+        builder: (context, state) =>
+            JobEditPage(jobId: state.pathParameters['id']!),
+      ),
+      GoRoute(
         path: AppRoutes.receivableDetail,
         builder: (context, state) =>
             ReceivableDetailPage(receivableId: state.pathParameters['id']!),
+      ),
+      GoRoute(
+        path: AppRoutes.staffExpenses,
+        builder: (context, state) =>
+            StaffExpensesPage(uid: state.pathParameters['uid']!),
       ),
     ],
   );

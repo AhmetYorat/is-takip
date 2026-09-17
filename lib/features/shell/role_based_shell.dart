@@ -61,7 +61,7 @@ class _RoleBasedShellState extends ConsumerState<RoleBasedShell> {
             const NavigationDestination(
               icon: Icon(Icons.receipt_long_outlined),
               selectedIcon: Icon(Icons.receipt_long),
-              label: 'Tahsilat',
+              label: 'Finans',
             ),
             const NavigationDestination(
               icon: Icon(Icons.groups_outlined),
@@ -88,7 +88,7 @@ class _RoleBasedShellState extends ConsumerState<RoleBasedShell> {
             const NavigationDestination(
               icon: Icon(Icons.receipt_long_outlined),
               selectedIcon: Icon(Icons.receipt_long),
-              label: 'Tahsilat',
+              label: 'Finans',
             ),
             NavigationDestination(
               icon: _NotificationIcon(count: unreadCount, filled: false),

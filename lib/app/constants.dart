@@ -11,6 +11,8 @@ class FirestoreCollections {
   static const String jobs = 'jobs';
   static const String receivables = 'receivables';
   static const String payments = 'payments';
+  static const String expenses = 'expenses';
+  static const String staffPayments = 'staffPayments';
   static const String notifications = 'notifications';
 }
 
@@ -62,6 +64,30 @@ class PaymentMethod {
   };
 }
 
+/// Expense (gider) category. Stored verbatim in `expenses/{id}.category`.
+class ExpenseCategory {
+  ExpenseCategory._();
+
+  static const String yiyecek = 'yiyecek';
+  static const String yakit = 'yakit';
+  static const String malzeme = 'malzeme';
+  static const String konaklama = 'konaklama';
+  static const String ulasim = 'ulasim';
+  static const String diger = 'diger';
+
+  static const all = [yiyecek, yakit, malzeme, konaklama, ulasim, diger];
+
+  static String label(String category) => switch (category) {
+    yiyecek => 'Yiyecek',
+    yakit => 'Yakıt',
+    malzeme => 'Malzeme',
+    konaklama => 'Konaklama',
+    ulasim => 'Ulaşım',
+    diger => 'Diğer',
+    _ => category,
+  };
+}
+
 /// Notification payload type, used for deep-linking when a notification
 /// card is tapped.
 class NotificationType {
@@ -83,8 +109,12 @@ class AppRoutes {
   static const String home = '/home';
   static const String jobCreate = '/jobs/create';
   static const String jobDetail = '/jobs/:id';
+  static const String jobEdit = '/jobs/:id/edit';
   static const String receivableDetail = '/receivables/:id';
+  static const String staffExpenses = '/staff/:uid/expenses';
 
   static String jobDetailPath(String id) => '/jobs/$id';
+  static String jobEditPath(String id) => '/jobs/$id/edit';
   static String receivableDetailPath(String id) => '/receivables/$id';
+  static String staffExpensesPath(String uid) => '/staff/$uid/expenses';
 }

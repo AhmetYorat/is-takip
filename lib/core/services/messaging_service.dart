@@ -95,17 +95,32 @@ class MessagingService {
   /// and keeps it fresh on rotation, so Cloud Functions can target this
   /// device for push.
   Future<void> syncToken(String uid) async {
-    // On iOS, FCM's token depends on the APNs token being registered
-    // first; requesting it explicitly avoids a null/late FCM token right
-    // after a fresh install.
-    if (!kIsWeb && Platform.isIOS) {
-      await _messaging.getAPNSToken();
-    }
-    final token = await _messaging.getToken();
-    if (token != null) {
-      await _saveToken(uid, token);
-    }
+    // Registered up front so a token obtained after a retry below (or any
+    // later rotation) is never missed, even if the initial fetch fails.
     _messaging.onTokenRefresh.listen((newToken) => _saveToken(uid, newToken));
+
+    try {
+      // On iOS, FCM's token depends on the native APNs device token being
+      // registered first. Right after a fresh install that registration
+      // (a round trip to Apple's push servers) hasn't necessarily finished
+      // yet, so getAPNSToken() can come back null; retry briefly instead of
+      // letting getToken() throw immediately.
+      if (!kIsWeb && Platform.isIOS) {
+        String? apnsToken = await _messaging.getAPNSToken();
+        var attempts = 0;
+        while (apnsToken == null && attempts < 10) {
+          await Future.delayed(const Duration(seconds: 1));
+          apnsToken = await _messaging.getAPNSToken();
+          attempts++;
+        }
+      }
+      final token = await _messaging.getToken();
+      if (token != null) {
+        await _saveToken(uid, token);
+      }
+    } catch (e) {
+      debugPrint('FCM token alınamadı: $e');
+    }
   }
 
   Future<void> _saveToken(String uid, String token) async {
@@ -122,9 +137,12 @@ class MessagingService {
   }
 
   Future<void> clearToken(String uid) async {
-    final token = await _messaging.getToken();
-    if (token == null) return;
     try {
+      if (!kIsWeb && Platform.isIOS) {
+        await _messaging.getAPNSToken();
+      }
+      final token = await _messaging.getToken();
+      if (token == null) return;
       await FirebaseFirestore.instance
           .collection(FirestoreCollections.users)
           .doc(uid)

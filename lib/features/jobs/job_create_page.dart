@@ -64,8 +64,10 @@ class _JobCreatePageState extends ConsumerState<JobCreatePage> {
 
     setState(() => _submitting = true);
     try {
-      final price =
-          double.tryParse(_priceController.text.replaceAll(',', '.')) ?? 0;
+      final priceText = _priceController.text.trim();
+      final price = priceText.isEmpty
+          ? null
+          : double.tryParse(priceText.replaceAll(',', '.'));
       final job = Job(
         id: '',
         title: _titleController.text.trim(),
@@ -181,11 +183,13 @@ class _JobCreatePageState extends ConsumerState<JobCreatePage> {
                   decimal: true,
                 ),
                 decoration: const InputDecoration(
-                  labelText: 'Fiyat (₺)',
+                  labelText: 'Fiyat (₺) (opsiyonel)',
                   prefixIcon: Icon(Icons.payments_outlined),
                 ),
                 validator: (v) {
-                  final value = double.tryParse((v ?? '').replaceAll(',', '.'));
+                  final text = (v ?? '').trim();
+                  if (text.isEmpty) return null;
+                  final value = double.tryParse(text.replaceAll(',', '.'));
                   if (value == null || value <= 0) {
                     return 'Geçerli bir fiyat girin';
                   }
@@ -205,8 +209,9 @@ class _JobCreatePageState extends ConsumerState<JobCreatePage> {
                     const SizedBox(width: AppSpacing.sm),
                     Expanded(
                       child: Text(
-                        'Girilen fiyat, Alacaklar sayfasına "(OTOMATİK)" '
-                        'olarak otomatik eklenecek.',
+                        'Fiyat girilirse Alacaklar sayfasına "(OTOMATİK)" '
+                        'olarak eklenir. Boş bırakırsanız İş Detayı\'ndan '
+                        'sonradan girebilirsiniz.',
                         style: Theme.of(
                           context,
                         ).textTheme.bodyMedium?.copyWith(color: colors.accent),

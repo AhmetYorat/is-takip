@@ -1,6 +1,8 @@
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:flutter/foundation.dart' show setEquals;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../app/constants.dart';
 import '../../app/theme.dart';
@@ -22,9 +24,35 @@ class JobDetailPage extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final jobAsync = ref.watch(jobByIdProvider(jobId));
+    final job = jobAsync.valueOrNull;
+    final appUser = ref.watch(currentAppUserProvider).valueOrNull;
+    final canEdit =
+        job != null &&
+        appUser != null &&
+        job.canBeEditedBy(uid: appUser.uid, isPatron: appUser.isPatron);
+    final canDelete =
+        job != null &&
+        appUser != null &&
+        job.canBeDeletedBy(uid: appUser.uid, isPatron: appUser.isPatron);
 
     return Scaffold(
-      appBar: AppBar(title: const Text('İş Detayı')),
+      appBar: AppBar(
+        title: const Text('İş Detayı'),
+        actions: [
+          if (canEdit)
+            IconButton(
+              icon: const Icon(Icons.edit_outlined),
+              tooltip: 'Düzenle',
+              onPressed: () => context.push(AppRoutes.jobEditPath(job.id)),
+            ),
+          if (canDelete)
+            IconButton(
+              icon: const Icon(Icons.delete_outline),
+              tooltip: 'Sil',
+              onPressed: () => _confirmDeleteJob(context, ref, job),
+            ),
+        ],
+      ),
       body: AsyncValueWidget<Job?>(
         value: jobAsync,
         data: (job) {
@@ -38,6 +66,52 @@ class JobDetailPage extends ConsumerWidget {
         },
       ),
     );
+  }
+}
+
+/// Confirms and runs [FirestoreService.deleteJob] — a top-level function
+/// (not a `_JobDetailBodyState` method) since it's triggered from
+/// [JobDetailPage]'s own `AppBar`, a sibling of `_JobDetailBody`.
+Future<void> _confirmDeleteJob(
+  BuildContext context,
+  WidgetRef ref,
+  Job job,
+) async {
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: const Text('İşi sil'),
+      content: const Text(
+        'Bu işi silmek istediğinize emin misiniz? Bu işlem geri alınamaz.',
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(false),
+          child: const Text('Vazgeç'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(context).pop(true),
+          style: FilledButton.styleFrom(
+            backgroundColor: Theme.of(context).colorScheme.error,
+          ),
+          child: const Text('Sil'),
+        ),
+      ],
+    ),
+  );
+  if (confirmed != true) return;
+  try {
+    await ref.read(firestoreServiceProvider).deleteJob(job.id);
+    if (context.mounted) context.pop();
+  } catch (e) {
+    if (context.mounted) {
+      final message = e is FirebaseFunctionsException
+          ? (e.message ?? e.code)
+          : e.toString();
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Hata: $message')));
+    }
   }
 }
 
@@ -95,6 +169,28 @@ class _JobDetailBodyState extends ConsumerState<_JobDetailBody> {
           context,
         ).showSnackBar(const SnackBar(content: Text('Personel güncellendi.')));
       }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Hata: $e')));
+      }
+    } finally {
+      if (mounted) setState(() => _submitting = false);
+    }
+  }
+
+  Future<void> _editPrice() async {
+    final price = await _AddPriceDialog.show(
+      context,
+      initialPrice: widget.job.hasPrice ? widget.job.price : null,
+    );
+    if (price == null) return;
+    setState(() => _submitting = true);
+    try {
+      await ref
+          .read(firestoreServiceProvider)
+          .setJobPrice(jobId: widget.job.id, price: price);
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(
@@ -201,6 +297,12 @@ class _JobDetailBodyState extends ConsumerState<_JobDetailBody> {
       _selectedStaffIds,
       job.assignedTo.toSet(),
     );
+    final canAddPrice =
+        !job.hasPrice &&
+        appUser != null &&
+        (appUser.isPatron || job.createdBy == appUser.uid) &&
+        !job.isCompleted &&
+        !job.isRejected;
 
     return SafeArea(
       child: ListView(
@@ -216,10 +318,38 @@ class _JobDetailBodyState extends ConsumerState<_JobDetailBody> {
             ],
           ),
           const SizedBox(height: AppSpacing.sm),
-          Text(
-            formatCurrency(job.price),
-            style: textTheme.headlineSmall?.copyWith(color: colors.accent),
-          ),
+          if (job.hasPrice)
+            Row(
+              children: [
+                Text(
+                  formatCurrency(job.price!),
+                  style: textTheme.headlineSmall?.copyWith(
+                    color: colors.accent,
+                  ),
+                ),
+                if (appUser != null &&
+                    job.canBeEditedBy(
+                      uid: appUser.uid,
+                      isPatron: appUser.isPatron,
+                    ))
+                  IconButton(
+                    icon: const Icon(Icons.edit_outlined, size: 18),
+                    tooltip: 'Fiyatı Düzenle',
+                    onPressed: _submitting ? null : _editPrice,
+                  ),
+              ],
+            )
+          else if (canAddPrice)
+            OutlinedButton.icon(
+              onPressed: _submitting ? null : _editPrice,
+              icon: const Icon(Icons.add),
+              label: const Text('Fiyat Ekle'),
+            )
+          else
+            Text(
+              'Fiyat girilmedi',
+              style: textTheme.bodyMedium?.copyWith(color: muted),
+            ),
           const SizedBox(height: AppSpacing.lg),
           _InfoRow(
             icon: Icons.storefront_outlined,
@@ -244,6 +374,12 @@ class _JobDetailBodyState extends ConsumerState<_JobDetailBody> {
             label: 'Oluşturan',
             value: staffNames[job.createdBy] ?? 'Bilinmiyor',
           ),
+          if (job.scheduledDate != null)
+            _InfoRow(
+              icon: Icons.event_available_outlined,
+              label: 'Planlanan Tarih',
+              value: formatDate(job.scheduledDate),
+            ),
           _InfoRow(
             icon: Icons.event_outlined,
             label: 'Oluşturulma',
@@ -381,6 +517,82 @@ class _InfoRow extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// Prompts for a job's price — either entering one for the first time
+/// ([initialPrice] null) or editing an existing one ([initialPrice] set,
+/// pre-filling the field). `firestore.rules` decides who may call this and
+/// when — see [Job.canBeEditedBy] for the "edit" case and `canAddPrice` in
+/// [_JobDetailBodyState] for the "first entry" case. Mirrors
+/// [EditNameDialog]'s pattern: a [StatefulWidget] so the
+/// [TextEditingController] is disposed by the widget lifecycle, not
+/// manually right after the dialog closes.
+class _AddPriceDialog extends StatefulWidget {
+  const _AddPriceDialog({this.initialPrice});
+
+  final double? initialPrice;
+
+  static Future<double?> show(BuildContext context, {double? initialPrice}) {
+    return showDialog<double>(
+      context: context,
+      builder: (context) => _AddPriceDialog(initialPrice: initialPrice),
+    );
+  }
+
+  @override
+  State<_AddPriceDialog> createState() => _AddPriceDialogState();
+}
+
+class _AddPriceDialogState extends State<_AddPriceDialog> {
+  final _formKey = GlobalKey<FormState>();
+  late final _controller = TextEditingController(
+    text: switch (widget.initialPrice) {
+      null => '',
+      final price when price % 1 == 0 => price.toInt().toString(),
+      final price => price.toString(),
+    },
+  );
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    if (!_formKey.currentState!.validate()) return;
+    final price = double.parse(_controller.text.replaceAll(',', '.'));
+    Navigator.of(context).pop(price);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text(widget.initialPrice == null ? 'Fiyat Ekle' : 'Fiyatı Düzenle'),
+      content: Form(
+        key: _formKey,
+        child: TextFormField(
+          controller: _controller,
+          autofocus: true,
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          decoration: const InputDecoration(labelText: 'Fiyat (₺)'),
+          validator: (v) {
+            final value = double.tryParse((v ?? '').replaceAll(',', '.'));
+            if (value == null || value <= 0) return 'Geçerli bir fiyat girin';
+            return null;
+          },
+          onFieldSubmitted: (_) => _submit(),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Vazgeç'),
+        ),
+        FilledButton(onPressed: _submit, child: const Text('Kaydet')),
+      ],
     );
   }
 }

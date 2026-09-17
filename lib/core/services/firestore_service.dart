@@ -1,12 +1,15 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../app/constants.dart';
 import '../models/app_notification.dart';
 import '../models/app_user.dart';
+import '../models/expense.dart';
 import '../models/job.dart';
 import '../models/payment.dart';
 import '../models/receivable.dart';
+import '../models/staff_payment.dart';
 import 'auth_service.dart';
 
 final firestoreProvider = Provider<FirebaseFirestore>((ref) {
@@ -35,6 +38,10 @@ class FirestoreService {
       _db.collection(FirestoreCollections.receivables);
   CollectionReference<Map<String, dynamic>> get _payments =>
       _db.collection(FirestoreCollections.payments);
+  CollectionReference<Map<String, dynamic>> get _expenses =>
+      _db.collection(FirestoreCollections.expenses);
+  CollectionReference<Map<String, dynamic>> get _staffPayments =>
+      _db.collection(FirestoreCollections.staffPayments);
   CollectionReference<Map<String, dynamic>> get _notifications =>
       _db.collection(FirestoreCollections.notifications);
 
@@ -69,6 +76,22 @@ class FirestoreService {
   }
 
   Future<void> createJob(Job job) => _jobs.add(job.toCreateMap());
+
+  /// Edits a job's own details (title/description/customer/address/
+  /// scheduledDate — see [Job.toUpdateMap]). `firestore.rules` enforces who
+  /// may call this and when (patron always; the creator only while
+  /// `pending_approval`) — see [Job.canBeEditedBy].
+  Future<void> updateJob({required String jobId, required Job updated}) =>
+      _jobs.doc(jobId).update(updated.toUpdateMap());
+
+  /// Deletes a job via the `deleteJob` Cloud Function — see its doc for why
+  /// this can't be a direct Firestore write. Throws
+  /// [FirebaseFunctionsException] on failure (e.g. already paid, or not
+  /// authorized) — [FirebaseFunctionsException.message] is already a
+  /// user-facing Turkish string from the function itself.
+  Future<void> deleteJob(String jobId) => FirebaseFunctions.instance
+      .httpsCallable('deleteJob')
+      .call({'jobId': jobId});
 
   Stream<Job?> watchJob(String jobId) {
     return _jobs
@@ -114,6 +137,18 @@ class FirestoreService {
   Future<void> updateJobStatus(String jobId, String status) {
     return _jobs.doc(jobId).update({
       'status': status,
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  /// Sets the price of a job that was created without one. `firestore.rules`
+  /// only allows this once (while the job has no price yet) — the
+  /// `onJobPriceSet` Cloud Function then creates the matching "(OTOMATİK)"
+  /// receivable, mirroring what `onJobCreated` does for a price set at
+  /// creation time.
+  Future<void> setJobPrice({required String jobId, required double price}) {
+    return _jobs.doc(jobId).update({
+      'price': price,
       'updatedAt': FieldValue.serverTimestamp(),
     });
   }
@@ -184,6 +219,109 @@ class FirestoreService {
       tx.update(receivableRef, {'paidAmount': currentPaid + payment.amount});
     });
   }
+
+  // ---- Expenses (giderler) ----------------------------------------------
+
+  /// All expenses created in [month] (any day, `[monthStart, nextMonthStart)`)
+  /// — used by the patron's company-wide Giderler view. Personel-facing
+  /// screens must use [watchExpensesCreatedByInMonth] instead; `firestore.rules`
+  /// rejects an unfiltered read from a non-patron.
+  Stream<List<Expense>> watchExpensesInMonth(DateTime month) {
+    final start = DateTime(month.year, month.month);
+    final end = DateTime(month.year, month.month + 1);
+    return _expenses
+        .where('createdAt', isGreaterThanOrEqualTo: Timestamp.fromDate(start))
+        .where('createdAt', isLessThan: Timestamp.fromDate(end))
+        .orderBy('createdAt', descending: true)
+        .snapshots()
+        .map((s) => s.docs.map(Expense.fromFirestore).toList());
+  }
+
+  /// [uid]'s own expenses in [month] — used by personel's Giderler view and
+  /// by the patron's per-staff-member detail page.
+  Stream<List<Expense>> watchExpensesCreatedByInMonth(
+    String uid,
+    DateTime month,
+  ) {
+    final start = DateTime(month.year, month.month);
+    final end = DateTime(month.year, month.month + 1);
+    return _expenses
+        .where('createdBy', isEqualTo: uid)
+        .where('createdAt', isGreaterThanOrEqualTo: Timestamp.fromDate(start))
+        .where('createdAt', isLessThan: Timestamp.fromDate(end))
+        .orderBy('createdAt', descending: true)
+        .snapshots()
+        .map((s) => s.docs.map(Expense.fromFirestore).toList());
+  }
+
+  Future<void> addExpense(Expense expense) =>
+      _expenses.add(expense.toCreateMap());
+
+  /// Deletes a wrongly entered expense. `firestore.rules` only allows this
+  /// for the expense's own creator or a patron.
+  Future<void> deleteExpense(String expenseId) =>
+      _expenses.doc(expenseId).delete();
+
+  /// All of [uid]'s expenses, every month — feeds their all-time reimbursement
+  /// balance (`Σ staffPayments − Σ expenses`), which unlike the monthly
+  /// Giderler view never resets when the month picker changes.
+  Stream<List<Expense>> watchExpensesCreatedByAllTime(String uid) {
+    return _expenses
+        .where('createdBy', isEqualTo: uid)
+        .orderBy('createdAt', descending: true)
+        .snapshots()
+        .map((s) => s.docs.map(Expense.fromFirestore).toList());
+  }
+
+  /// Every expense ever recorded, company-wide — patron's all-time balance
+  /// total. `firestore.rules` only allows an unfiltered read for a patron.
+  Stream<List<Expense>> watchAllExpensesAllTime() {
+    return _expenses
+        .orderBy('createdAt', descending: true)
+        .snapshots()
+        .map((s) => s.docs.map(Expense.fromFirestore).toList());
+  }
+
+  // ---- Staff payments (personel bakiyesi / geri ödeme) -------------------
+
+  /// Every reimbursement [staffId] has ever received, all-time — the other
+  /// half of their balance alongside [watchExpensesCreatedByAllTime].
+  Stream<List<StaffPayment>> watchStaffPaymentsForStaff(String staffId) {
+    return _staffPayments
+        .where('staffId', isEqualTo: staffId)
+        .orderBy('createdAt', descending: true)
+        .snapshots()
+        .map((s) => s.docs.map(StaffPayment.fromFirestore).toList());
+  }
+
+  /// [staffId]'s reimbursements in [month] — shown as "+" entries alongside
+  /// that month's expenses in the Giderler list.
+  Stream<List<StaffPayment>> watchStaffPaymentsForStaffInMonth(
+    String staffId,
+    DateTime month,
+  ) {
+    final start = DateTime(month.year, month.month);
+    final end = DateTime(month.year, month.month + 1);
+    return _staffPayments
+        .where('staffId', isEqualTo: staffId)
+        .where('createdAt', isGreaterThanOrEqualTo: Timestamp.fromDate(start))
+        .where('createdAt', isLessThan: Timestamp.fromDate(end))
+        .orderBy('createdAt', descending: true)
+        .snapshots()
+        .map((s) => s.docs.map(StaffPayment.fromFirestore).toList());
+  }
+
+  /// Every reimbursement ever recorded, company-wide — patron's all-time
+  /// balance total and per-person breakdown on the Giderler screen.
+  Stream<List<StaffPayment>> watchAllStaffPayments() {
+    return _staffPayments
+        .orderBy('createdAt', descending: true)
+        .snapshots()
+        .map((s) => s.docs.map(StaffPayment.fromFirestore).toList());
+  }
+
+  Future<void> addStaffPayment(StaffPayment payment) =>
+      _staffPayments.add(payment.toCreateMap());
 
   // ---- Staff (personeller) --------------------------------------------
 
@@ -289,6 +427,78 @@ final paymentsForReceivableProvider =
           .watch(firestoreServiceProvider)
           .watchPaymentsForReceivable(receivableId);
     });
+
+/// Every expense in [month], company-wide — patron's Giderler view.
+final expensesInMonthProvider = StreamProvider.family<List<Expense>, DateTime>((
+  ref,
+  month,
+) {
+  ref.watch(authStateChangesProvider);
+  return ref.watch(firestoreServiceProvider).watchExpensesInMonth(month);
+});
+
+/// One person's expenses in one month — personel's own Giderler view and
+/// the patron's per-staff-member detail page. `uid`+`month` bundled as a
+/// record so both vary the query key together.
+final myExpensesInMonthProvider =
+    StreamProvider.family<List<Expense>, ({String uid, DateTime month})>((
+      ref,
+      key,
+    ) {
+      ref.watch(authStateChangesProvider);
+      return ref
+          .watch(firestoreServiceProvider)
+          .watchExpensesCreatedByInMonth(key.uid, key.month);
+    });
+
+/// [uid]'s expenses, all-time — half of their reimbursement balance.
+final allTimeExpensesCreatedByProvider =
+    StreamProvider.family<List<Expense>, String>((ref, uid) {
+      ref.watch(authStateChangesProvider);
+      return ref
+          .watch(firestoreServiceProvider)
+          .watchExpensesCreatedByAllTime(uid);
+    });
+
+/// Every expense ever recorded, company-wide — patron's all-time balance
+/// total across all staff.
+final allExpensesAllTimeProvider = StreamProvider<List<Expense>>((ref) {
+  final signedIn = ref.watch(authStateChangesProvider).valueOrNull != null;
+  if (!signedIn) return Stream.value(const []);
+  return ref.watch(firestoreServiceProvider).watchAllExpensesAllTime();
+});
+
+/// [uid]'s reimbursements, all-time — the other half of their balance.
+final staffPaymentsForStaffProvider =
+    StreamProvider.family<List<StaffPayment>, String>((ref, uid) {
+      ref.watch(authStateChangesProvider);
+      return ref
+          .watch(firestoreServiceProvider)
+          .watchStaffPaymentsForStaff(uid);
+    });
+
+/// [uid]'s reimbursements in one month — the "+" entries shown in that
+/// month's Giderler list, bundled the same way as [myExpensesInMonthProvider].
+final myStaffPaymentsInMonthProvider =
+    StreamProvider.family<List<StaffPayment>, ({String uid, DateTime month})>((
+      ref,
+      key,
+    ) {
+      ref.watch(authStateChangesProvider);
+      return ref
+          .watch(firestoreServiceProvider)
+          .watchStaffPaymentsForStaffInMonth(key.uid, key.month);
+    });
+
+/// Every reimbursement ever recorded, company-wide — patron's all-time
+/// balance total and per-person breakdown.
+final allStaffPaymentsAllTimeProvider = StreamProvider<List<StaffPayment>>((
+  ref,
+) {
+  final signedIn = ref.watch(authStateChangesProvider).valueOrNull != null;
+  if (!signedIn) return Stream.value(const []);
+  return ref.watch(firestoreServiceProvider).watchAllStaffPayments();
+});
 
 final staffProvider = StreamProvider<List<AppUser>>((ref) {
   final signedIn = ref.watch(authStateChangesProvider).valueOrNull != null;

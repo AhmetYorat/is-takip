@@ -82,6 +82,12 @@ service cloud.firestore {
                         && request.resource.data.approvedBy == request.auth.uid)
                     );
 
+      function hasNoPriceYet() {
+        return !('price' in resource.data)
+               || !(resource.data.price is number)
+               || resource.data.price <= 0;
+      }
+
       allow update: if isSignedIn() && (
         // Patron: assign/approve/reject or any other field.
         isPatron()
@@ -93,8 +99,34 @@ service cloud.firestore {
           resource.data.status in ['approved', 'in_progress'] &&
           request.resource.data.status in ['in_progress', 'completed']
         )
+        ||
+        // Job creator: may set the price exactly once, if it wasn't given
+        // at creation — never overwrite an existing price from here.
+        (
+          request.auth.uid == resource.data.createdBy &&
+          onlyFieldsChanged(['price', 'updatedAt']) &&
+          hasNoPriceYet() &&
+          request.resource.data.price is number &&
+          request.resource.data.price > 0
+        )
+        ||
+        // Job creator: may fix the job's own details while it's still
+        // waiting for a patron's approval — never after it's been approved
+        // (from then on they can only move its status forward, above).
+        (
+          request.auth.uid == resource.data.createdBy &&
+          resource.data.status == 'pending_approval' &&
+          onlyFieldsChanged(['title', 'description', 'customerName',
+                              'address', 'scheduledDate', 'price', 'updatedAt']) &&
+          (request.resource.data.price == null ||
+           (request.resource.data.price is number && request.resource.data.price > 0))
+        )
       );
 
+      // Never a direct client delete — see the `deleteJob` callable
+      // (functions/index.js) for why: whether it's allowed depends on the
+      // linked automatic receivable's paidAmount, a cross-collection check
+      // rules can't express (no doc-id relationship, only a `jobId` field).
       allow delete: if false;
     }
 
@@ -136,6 +168,43 @@ service cloud.firestore {
                     && request.resource.data.amount > 0;
 
       // Append-only: a payment is never edited or deleted once recorded.
+      allow update, delete: if false;
+    }
+
+    // ---- expenses (giderler) --------------------------------------------
+    match /expenses/{expenseId} {
+      // Patron sees every expense; personel only ever sees their own.
+      allow read: if isSignedIn()
+                  && (isPatron() || resource.data.createdBy == request.auth.uid);
+
+      allow create: if isSignedIn()
+                    && request.resource.data.createdBy == request.auth.uid
+                    && request.resource.data.amount > 0;
+
+      // No edit path — a wrong entry is deleted and re-added, by its own
+      // creator or a patron.
+      allow update: if false;
+      allow delete: if isSignedIn()
+                    && (isPatron() || resource.data.createdBy == request.auth.uid);
+    }
+
+    // ---- staffPayments (personel bakiyesi / geri ödeme) ----------------------
+    match /staffPayments/{paymentId} {
+      // A staff member sees their own reimbursements (matches the
+      // `watchStaffPaymentsForStaff` query the app runs for them); a patron
+      // sees every one, for the company-wide balance breakdown.
+      allow read: if isSignedIn()
+                  && (isPatron() || resource.data.staffId == request.auth.uid);
+
+      // A patron may record a reimbursement for anyone; a staff member may
+      // only log one for themself ("paramı aldım").
+      allow create: if isSignedIn()
+                    && request.resource.data.createdBy == request.auth.uid
+                    && request.resource.data.amount > 0
+                    && (isPatron() || request.resource.data.staffId == request.auth.uid);
+
+      // Append-only, like `payments` — a real money movement is never
+      // edited or deleted once recorded.
       allow update, delete: if false;
     }
 

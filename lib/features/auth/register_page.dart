@@ -47,7 +47,7 @@ class _RegisterPageState extends ConsumerState<RegisterPage> {
           );
       // Navigation happens automatically via the router's auth redirect.
     } catch (e) {
-      setState(() => _errorText = authErrorMessage(e));
+      if (mounted) setState(() => _errorText = authErrorMessage(e));
     } finally {
       if (mounted) setState(() => _submitting = false);
     }
@@ -77,16 +77,6 @@ class _RegisterPageState extends ConsumerState<RegisterPage> {
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     Text('Hesap oluşturun', style: textTheme.headlineMedium),
-                    const SizedBox(height: AppSpacing.xs),
-                    Text(
-                      'İlk kayıt olan kullanıcı otomatik olarak patron olur; '
-                      'sonraki kayıtlar personel olarak başlar.',
-                      style: textTheme.bodyMedium?.copyWith(
-                        color: Theme.of(
-                          context,
-                        ).colorScheme.onSurface.withValues(alpha: 0.6),
-                      ),
-                    ),
                     const SizedBox(height: AppSpacing.xl),
                     TextFormField(
                       controller: _nameController,

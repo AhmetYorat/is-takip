@@ -21,6 +21,8 @@ class AppColors extends ThemeExtension<AppColors> {
     required this.warning,
     required this.cardShadow,
     required this.badgeAutomatic,
+    required this.danger,
+    required this.onDanger,
   });
 
   final Color accent;
@@ -30,6 +32,13 @@ class AppColors extends ThemeExtension<AppColors> {
   final Color cardShadow;
   final Color badgeAutomatic;
 
+  /// Solid "hero" block red (e.g. Toplam Gider card). Fixed across light/dark
+  /// so it stays a rich, corporate red instead of `colorScheme.error`, which
+  /// is tuned lighter/brighter in dark mode for legible text/icons and reads
+  /// as neon when used as a large fill.
+  final Color danger;
+  final Color onDanger;
+
   static const light = AppColors(
     accent: Color(0xFF059669),
     onAccent: Color(0xFFFFFFFF),
@@ -37,6 +46,8 @@ class AppColors extends ThemeExtension<AppColors> {
     warning: Color(0xFFD97706),
     cardShadow: Color(0x142563EB),
     badgeAutomatic: Color(0xFF7C3AED),
+    danger: Color(0xFFDC2626),
+    onDanger: Color(0xFFFFFFFF),
   );
 
   static const dark = AppColors(
@@ -46,6 +57,8 @@ class AppColors extends ThemeExtension<AppColors> {
     warning: Color(0xFFFBBF24),
     cardShadow: Color(0x33000000),
     badgeAutomatic: Color(0xFFA78BFA),
+    danger: Color(0xFFDC2626),
+    onDanger: Color(0xFFFFFFFF),
   );
 
   @override
@@ -56,6 +69,8 @@ class AppColors extends ThemeExtension<AppColors> {
     Color? warning,
     Color? cardShadow,
     Color? badgeAutomatic,
+    Color? danger,
+    Color? onDanger,
   }) {
     return AppColors(
       accent: accent ?? this.accent,
@@ -64,6 +79,8 @@ class AppColors extends ThemeExtension<AppColors> {
       warning: warning ?? this.warning,
       cardShadow: cardShadow ?? this.cardShadow,
       badgeAutomatic: badgeAutomatic ?? this.badgeAutomatic,
+      danger: danger ?? this.danger,
+      onDanger: onDanger ?? this.onDanger,
     );
   }
 
@@ -77,6 +94,8 @@ class AppColors extends ThemeExtension<AppColors> {
       warning: Color.lerp(warning, other.warning, t)!,
       cardShadow: Color.lerp(cardShadow, other.cardShadow, t)!,
       badgeAutomatic: Color.lerp(badgeAutomatic, other.badgeAutomatic, t)!,
+      danger: Color.lerp(danger, other.danger, t)!,
+      onDanger: Color.lerp(onDanger, other.onDanger, t)!,
     );
   }
 }
